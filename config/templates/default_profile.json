@@ -1,0 +1,100 @@
+{
+  "name": "default",
+  "version": "1.0.0",
+  "description": "通用运营商套餐 Offer 画像模板",
+
+  "fields": [
+    {
+      "name": "offer_id",
+      "type": "string",
+      "required": true,
+      "description": "套餐唯一标识",
+      "source": "tmf"
+    },
+    {
+      "name": "offer_name",
+      "type": "string",
+      "required": true,
+      "description": "套餐名称",
+      "source": "tmf"
+    },
+    {
+      "name": "category",
+      "type": "string",
+      "required": true,
+      "description": "套餐类别(如:语音套餐/流量套餐/融合套餐)",
+      "source": "tmf"
+    },
+    {
+      "name": "price",
+      "type": "number",
+      "required": false,
+      "description": "套餐价格(元/月)",
+      "source": "tmf"
+    },
+    {
+      "name": "target_users",
+      "type": "array",
+      "required": true,
+      "description": "目标用户群画像，每项包含{人群类型,特征描述,年龄范围,消费等级}",
+      "source": "model",
+      "prompt_instruction": "根据套餐内容推理出最适合的目标用户群体"
+    },
+    {
+      "name": "key_features",
+      "type": "array",
+      "required": true,
+      "description": "核心卖点，每项为简短的卖点描述字符串",
+      "source": "model",
+      "prompt_instruction": "提取3-5个最有吸引力的卖点"
+    },
+    {
+      "name": "tags",
+      "type": "array",
+      "required": true,
+      "description": "分类标签",
+      "source": "model",
+      "prompt_instruction": "生成5-10个中英文标签，如[\"5G\",\"大流量\",\"学生优惠\"]"
+    },
+    {
+      "name": "usage_scenario",
+      "type": "string",
+      "required": false,
+      "description": "典型使用场景描述",
+      "source": "model",
+      "prompt_instruction": "描述该套餐最适合的使用场景"
+    },
+    {
+      "name": "user_pain_points",
+      "type": "array",
+      "required": false,
+      "description": "解决的用户痛点",
+      "source": "model",
+      "prompt_instruction": "分析该套餐解决的用户核心痛点"
+    },
+    {
+      "name": "competitive_advantages",
+      "type": "array",
+      "required": false,
+      "description": "相较竞品的竞争优势",
+      "source": "rag",
+      "prompt_instruction": "从行业知识库检索竞品对比信息"
+    },
+    {
+      "name": "market_insights",
+      "type": "string",
+      "required": false,
+      "description": "市场趋势分析",
+      "source": "rag",
+      "prompt_instruction": "从知识库获取相关市场分析报告"
+    },
+    {
+      "name": "price_segment",
+      "type": "string",
+      "required": false,
+      "description": "价格段位(低端/中端/高端)",
+      "source": "rule",
+      "prompt_instruction": "价格<50元为低端,50-150元为中端,>150元为高端"
+    }
+  ]
+}

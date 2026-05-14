@@ -1,0 +1,32 @@
+{
+  "id": "OFFER-5G-PRO-2024",
+  "name": "5G畅享Pro套餐",
+  "description": "面向年轻用户的高性价比5G套餐，包含150GB全国流量、1000分钟通话，赠送视频会员权益",
+  "category": "个人融合套餐",
+  "price": 129,
+  "characteristics": {
+    "network_type": "5G",
+    "data_quota_gb": 150,
+    "voice_minutes": 1000,
+    "contract_period_months": 12,
+    "speed_limit_mbps": 500,
+    "roaming": "全国"
+  },
+  "product_specification": {
+    "id": "SPEC-5G-001",
+    "name": "5G基础规格",
+    "lifecycle_status": "active"
+  },
+  "bundled_product_offering": [
+    {
+      "id": "BUNDLE-VIDEO-001",
+      "name": "视频会员包",
+      "description": "腾讯视频VIP月卡"
+    },
+    {
+      "id": "BUNDLE-CLOUD-001",
+      "name": "云存储包",
+      "description": "50GB个人云存储空间"
+    }
+  ]
+}

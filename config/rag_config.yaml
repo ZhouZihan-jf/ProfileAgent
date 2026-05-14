@@ -1,0 +1,29 @@
+# RAG API 配置
+
+# API 基础地址
+base_url: "http://localhost:8000/api/v1"
+
+# 认证密钥 (可选，留空则不认证)
+api_key: ""
+
+# 请求超时(秒)
+timeout: 30
+
+# 最大重试次数
+max_retries: 2
+
+# 默认返回文档数
+default_top_k: 5
+
+# 可用端点
+endpoints:
+  - name: search
+    path: /rag/search
+    method: POST
+    headers: {}
+
+  - name: retrieve
+    path: /rag/retrieve
+    method: POST
+    headers:
+      X-Retrieval-Mode: hybrid
