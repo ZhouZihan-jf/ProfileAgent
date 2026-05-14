@@ -3,9 +3,10 @@
 > 生成时间: 2025-05-14
 > 最后更新: 2025-05-14
 > 项目路径: `f:/projects/ProfileAgent`
+> GitHub: `https://github.com/ZhouZihan-jf/ProfileAgent`
 
 > **架构决策**: prompt 模板全部存放于 `config/prompts/`，通过 `load_prompt()` 加载，支持热编辑。
-> **架构精简**: 所有 Agent 节点合并为 `nodes.py`，配置模型+加载器合并为 `config.py`，源码从17个文件精简至9个。
+> **架构精简**: 所有 Agent 节点合并为 `nodes.py`，配置模型+加载器合并为 `config.py`，源码从 17 个文件精简至 9 个。
 
 ---
 
@@ -17,10 +18,11 @@
 
 | 特性 | 实现 |
 |------|------|
-| **可配置画像模板** | 通过 YAML 定义输出 JSON 结构，无需改代码即可切换不同画像 schema |
+| **可配置画像模板** | 通过 JSON 定义输出结构，`config/templates/` 热切换不同 schema |
+| **Prompt 外置管理** | 所有 LLM 提示词存于 `config/prompts/`，编辑 `.md` 即可调优，无需改代码 |
 | **模型自主 RAG 决策** | 模型根据 `rules.md` 规则自行判断是否调用 RAG API，而非硬编码 |
-| **多源字段支持** | 每个画像字段标记 `source`：`tmf`(提取) / `model`(LLM生成) / `rag`(检索) / `rule`(规则计算) |
-| **RAG API 通过 RESTful 接入** | `RAGClient` 类统一管理 API 调用，支持多种响应格式自动适配 |
+| **多源字段支持** | 每个字段标记 `source`：`tmf`(提取) / `model`(LLM生成) / `rag`(检索) / `rule`(规则计算) |
+| **RAG API 通过 RESTful 接入** | `RAGClient` 统一管理 API 调用，支持多种响应格式自动适配 |
 | **条件路由** | LangGraph 条件边实现按需跳过 RAG 节点 |
 
 ---
@@ -47,6 +49,7 @@ Python 3.10+
 - **类型检查**: basedpyright，自定义配置 `pyrightconfig.json`
   - 基础 strict 模式启用
   - `reportAny` / `reportExplicitAny`: 禁用（项目大量字典操作，此类规则无益）
+- **版本管理**: Git (master)，远端托管于 GitHub `zhouzihan-jf/ProfileAgent`
 
 ---
 
@@ -178,11 +181,13 @@ class AgentState(TypedDict):
 - `TMFOffer`: TMF 输入模型
 
 **加载器函数**：
-- `load_prompt(name)` — 加载 `config/prompts/{name}.md`，支持惰性缓存
+- `load_prompt(name)` — 加载 `config/prompts/{name}.md`，各节点通过模块级 `_get_*_prompt()` 惰性缓存，运行时只加载一次
 - `load_profile_template(name)` — 加载 `config/templates/{name}_profile.json`
 - `load_rag_config()` — 加载 `config/rag_config.yaml`
 - `load_rules()` — 加载 `config/rules/rag_rules.md`
 - `validate_tmf_input()` — 校验 TMF JSON 必填字段
+
+> **注意**: `prompts/` 目录下每个 `.md` 文件通过 `{placeholder}` 占位符暴露可变段，节点调用 `.format()` 注入运行时上下文。非开发人员可直接编辑 `.md` 调优模型行为。
 
 ### 5.2 RAG 客户端 (`src/rag/client.py`)
 
@@ -205,27 +210,41 @@ class RAGClient:
 **这是整个 Agent 最核心的决策节点**：
 
 1. 提取模板中 `source=rag` 的字段
-2. 若无 RAG 字段 → 直接返回 `need_rag=false`（跳过 LLM 调用）
+2. 若无 RAG 字段 → 直接返回 `need_rag=false`（跳过 LLM 调用），节省一次 API 请求
 3. 构建 TMF 摘要 + 模板字段列表
-4. 通过 `DECISION_PROMPT` 注入 rules.md，让 LLM 判断是否需要 RAG
+4. 通过 `load_prompt("rag_decision")` 加载外部 prompt 并用 `.format(rules=..., tmf_summary=..., template_fields=...)` 注入上下文
 5. LLM 返回 JSON：`{"need_rag": bool, "reasoning": "...", "queries": [...]}`
-6. 异常兜底：解析失败时默认 `need_rag=false`
+6. 异常兜底：解析失败时默认 `need_rag=false`，保证工作流不中断
 
 ### 5.4 generate_profile 节点 (`src/agent/nodes.py` 中的 `generate_profile` 函数)
 
-- 按 `GENERATION_PROMPT` 将模板字段、TMF 数据、RAG 结果组合成 prompt
+- 通过 `load_prompt("generate_profile")` 加载外部 prompt，`.format(template_json=..., tmf_json=..., rag_context=...)` 注入实时数据
 - 四个 source 对应四种处理策略：
   - `tmf` → 直接从输入提取
   - `model` → LLM 上下文推理生成
   - `rag` → 基于检索结果填充
   - `rule` → 按 `prompt_instruction` 定义的规则计算
 - 输出纯 JSON（自动剥离 markdown 代码块）
+- 全部字段必须有值（required 字段不允 null），数组类型至少含 1 个元素
 
 ---
 
 ## 六、配置文件说明
 
-### 6.1 画像模板 (`config/templates/default_profile.json`)
+### 6.1 Prompt 体系 (`config/prompts/`)
+
+所有 LLM 提示词外置于独立 `.md` 文件，通过 `load_prompt(name)` 统一加载：
+
+| 文件 | 注入占位符 | 职责 |
+|------|-----------|------|
+| `generate_profile.md` | `{template_json}` `{tmf_json}` `{rag_context}` | 指导 LLM 融合多源数据生成结构化画像 JSON |
+| `rag_decision.md` | `{rules}` `{tmf_summary}` `{template_fields}` | 指导 LLM 判断是否需要调用 RAG 知识库 |
+
+> **工作流**: 节点函数调用 `load_prompt("xxx")` → 返回原始 `.md` 文本 → `.format(**context)` 填充占位符 → 送入 LLM。
+>
+> **优化提示**: 编辑 `.md` 而非 Python 代码即可调优模型行为，修改即时生效（开发环境建议重启进程）。
+
+### 6.2 画像模板 (`config/templates/default_profile.json`)
 
 ```json
 {
@@ -246,11 +265,11 @@ class RAGClient:
 - `rag`   — 通过 RAG 知识库检索填充
 - `rule`  — 按 `prompt_instruction` 中的规则计算
 
-### 6.2 RAG 规则 (`config/rules/rag_rules.md`)
+### 6.3 RAG 规则 (`config/rules/rag_rules.md`)
 
 定义何时调用 RAG、查询生成规则、结果使用规则。**模型在 rag_decision 节点读取此文件进行自主决策**。
 
-### 6.3 RAG API 配置 (`config/rag_config.yaml`)
+### 6.4 RAG API 配置 (`config/rag_config.yaml`)
 
 ```yaml
 base_url: "http://localhost:8000/api/v1"
@@ -268,7 +287,7 @@ endpoints:
       X-Retrieval-Mode: hybrid
 ```
 
-### 6.4 示例数据 (`data/sample_tmf.json`)
+### 6.5 示例数据 (`data/sample_tmf.json`)
 
 "5G畅享Pro套餐" — 包含 id, name, description, category, price, characteristics, product_specification, bundled_product_offering。
 
@@ -304,24 +323,53 @@ python -m src.main -i data/sample_tmf.json -o output/result.json
 
 ---
 
-## 八、扩展指南
+## 八、GitHub 仓库
+
+```bash
+# 克隆
+git clone https://github.com/ZhouZihan-jf/ProfileAgent.git
+cd ProfileAgent
+
+# 创建虚拟环境 & 安装依赖
+uv venv .venv
+uv pip install -r requirements.txt
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env 填入 API Key
+
+# 运行
+python -m src.main --input data/sample_tmf.json --verbose
+```
+
+- **分支**: `master`
+- **推送策略**: 直接推送至 `origin/master`
+- **Token 权限**: `repo`, `workflow`, `gist`, `read:org`（覆盖 CI/CD 需求）
+
+---
+
+## 九、扩展指南
 
 | 需求 | 操作 |
 |------|------|
-| **新增画像模板** | 创建 `config/templates/xxx_profile.json`，调用 `load_profile_template("xxx")` |
-| **修改 RAG 规则** | 编辑 `config/rules/rag_rules.md`，模型自动适配 |
-| **新增节点** | 在 `src/agent/nodes.py` 添加函数，在 `graph.py` 注册节点和边 |
-| **切换 LLM** | 修改 `.env` 中 `LLM_MODEL` 和 `OPENAI_BASE_URL` |
+| **调优画像 prompt** | 编辑 `config/prompts/generate_profile.md`，无需碰 Python 代码 |
+| **调优 RAG 决策行为** | 编辑 `config/prompts/rag_decision.md` |
+| **修改 RAG 调用规则** | 编辑 `config/rules/rag_rules.md`，模型自动适配 |
+| **新增画像模板** | 创建 `config/templates/xxx_profile.json` |
 | **切换 RAG 端点** | 修改 `config/rag_config.yaml` 中 endpoints 配置 |
+| **新增工作流节点** | 在 `src/agent/nodes.py` 添加函数 → 在 `graph.py` 注册节点和边 |
+| **切换 LLM** | 修改 `.env` 中 `LLM_MODEL` 和 `OPENAI_BASE_URL` |
 | **流式输出** | 利用 LangGraph 的 `stream()` 模式 |
 
 ---
 
-## 九、设计决策记录
+## 十、设计决策记录
 
 1. **LLM 通过闭包注入**：`graph.py` 中 `_rag_decision_wrapper(llm)` 和 `_generate_profile_wrapper(llm)` 将 LLM 实例注入节点，避免节点直接依赖全局 LLM。
-2. **配置全部外置**：所有可配置项（模板、规则、API）均通过 YAML/MD 文件管理，代码零修改即可适配不同场景。
-3. **条件边实现 RAG 跳过**：`_route_after_decision()` 读取 state.need_rag 进行路由，确保 RAG 不可用时工作流仍可完成。
-4. **rag_decision 有安全兜底**：模板中无 `source=rag` 字段时跳过 LLM 调用；LLM 解析失败时默认 `need_rag=false`。
-5. **RAG 客户端支持多格式**：`_parse_response()` 处理 3 种常见 API 响应格式，降低与具体 RAG 后端的耦合。
-6. **validate_profile 不阻断输出**：即使校验发现错误也保留 `final_output`，由调用方决定是否采纳。
+2. **配置全部外置**：所有可配置项（模板、规则、API、prompt）均通过 `config/` 下的 JSON/YAML/MD 文件管理，代码零修改即可适配不同场景。
+3. **Prompt 外置 + 惰性加载**：LLM 提示词存放于 `config/prompts/`，通过 `load_prompt()` 加载 + 模块级 `str | None` 缓存，非开发人员可直接编辑 `.md` 调优。
+4. **条件边实现 RAG 跳过**：`_route_after_decision()` 读取 `state.need_rag` 进行路由，确保 RAG 不可用时工作流仍可完成。
+5. **rag_decision 有安全兜底**：模板中无 `source=rag` 字段时跳过 LLM 调用；LLM 解析失败时默认 `need_rag=false`。
+6. **RAG 客户端支持多格式**：`_parse_response()` 处理 3 种常见 API 响应格式，降低与具体 RAG 后端的耦合。
+7. **validate_profile 不阻断输出**：即使校验发现错误也保留 `final_output`，由调用方决定是否采纳。
+8. **架构持续精简**：经历两轮重构——先抽离 prompt 为独立文件，再将 6 个节点合并为 `nodes.py`、配置模型+加载器合并为 `config.py`，源码从 多文件摊平至 9 个。
