@@ -1,9 +1,9 @@
 {
   "id": "OFFER-5G-PRO-2024",
-  "name": "5G畅享Pro套餐",
-  "description": "面向年轻用户的高性价比5G套餐，包含150GB全国流量、1000分钟通话，赠送视频会员权益",
+  "name": "5G畅享Pro融合套餐",
+  "description": "面向家庭用户的高性价比5G融合套餐，包含150GB全国流量、1000分钟通话、千兆宽带，赠送视频会员权益",
   "category": "个人融合套餐",
-  "price": 129,
+  "price": 169,
   "characteristics": {
     "network_type": "5G",
     "data_quota_gb": 150,
@@ -27,6 +27,98 @@
       "id": "BUNDLE-CLOUD-001",
       "name": "云存储包",
       "description": "50GB个人云存储空间"
+    }
+  ],
+  "plan_list": [
+    {
+      "id": "PLAN-5G-BASE",
+      "name": "5G基础流量套餐",
+      "description": "核心5G流量+语音基础套餐，提供150GB流量和1000分钟通话",
+      "type": "主套餐",
+      "status": "active",
+      "lifecycle_status": "active",
+      "policy": {
+        "id": "POLICY-BASE-001",
+        "name": "标准计费策略",
+        "description": "按月固定计费，超出后限速不限量",
+        "type": "postpaid",
+        "priority": 1,
+        "status": "active",
+        "pattern": {
+          "id": "PATTERN-RECURRING-001",
+          "name": "月固定费模式",
+          "description": "每月固定日期扣费",
+          "type": "recurring",
+          "action": {
+            "id": "ACTION-CHARGE-001",
+            "name": "月租扣费",
+            "description": "每月1号从账户余额扣除月租",
+            "type": "charge",
+            "value": 99,
+            "unit": "元/月"
+          }
+        }
+      }
+    },
+    {
+      "id": "PLAN-BROADBAND",
+      "name": "千兆宽带附加包",
+      "description": "独立宽带接入服务，提供1000Mbps光纤宽带",
+      "type": "附加包",
+      "status": "active",
+      "lifecycle_status": "active",
+      "policy": {
+        "id": "POLICY-BROADBAND-001",
+        "name": "宽带叠加计费",
+        "description": "在基础套餐上叠加宽带费用",
+        "type": "addon",
+        "priority": 2,
+        "status": "active",
+        "pattern": {
+          "id": "PATTERN-ADDON-001",
+          "name": "叠加计费模式",
+          "description": "每月额外叠加宽带费用",
+          "type": "recurring_addon",
+          "action": {
+            "id": "ACTION-ADDON-001",
+            "name": "宽带叠加扣费",
+            "description": "每月额外收取宽带接入费",
+            "type": "addon_charge",
+            "value": 50,
+            "unit": "元/月"
+          }
+        }
+      }
+    },
+    {
+      "id": "PLAN-BUNDLES",
+      "name": "会员权益捆绑包",
+      "description": "包含视频会员和云存储空间的价值服务包",
+      "type": "权益包",
+      "status": "active",
+      "lifecycle_status": "active",
+      "policy": {
+        "id": "POLICY-BUNDLE-001",
+        "name": "权益赠送策略",
+        "description": "合约期内免费赠送权益服务",
+        "type": "free_bundle",
+        "priority": 3,
+        "status": "active",
+        "pattern": {
+          "id": "PATTERN-FREE-001",
+          "name": "合约期内免费模式",
+          "description": "12个月合约期内免费",
+          "type": "contract_free",
+          "action": {
+            "id": "ACTION-FREE-001",
+            "name": "免费开通权益",
+            "description": "自动开通视频会员和云存储权益",
+            "type": "free_activation",
+            "value": 20,
+            "unit": "元/月（免收）"
+          }
+        }
+      }
     }
   ]
 }

@@ -1,14 +1,14 @@
 """
-ProfileAgent 主入口
+ProfileAgent 主入口 (v2 — 多 Plan 并行架构)
 
 用法:
     python -m src.main --input data/sample_tmf.json
 
 流程:
     1. 加载环境变量和 LLM
-    2. 编译 LangGraph Agent
+    2. 编译 LangGraph Agent (v2)
     3. 读取 TMF 输入 JSON
-    4. 运行 Agent 工作流
+    4. 运行 Agent 工作流 (parse → slim → overview → RAG → parallel plans → final)
     5. 输出 offer 画像 JSON
 """
 
@@ -40,10 +40,39 @@ def get_llm() -> ChatOpenAI:
     _api_key = os.getenv("OPENAI_API_KEY")
     return ChatOpenAI(
         model=os.getenv("LLM_MODEL", "gpt-4o"),
-        api_key=_api_key if _api_key else None,  # type: ignore[arg-type]
+        api_key=_api_key if _api_key else None,
         base_url=os.getenv("OPENAI_BASE_URL"),
         temperature=0.1,
     )
+
+
+def _make_initial_state(tmf_data: dict[str, Any]) -> dict[str, Any]:
+    """构建 Agent 初始状态（v2 新增字段）"""
+    return {
+        # 输入
+        "tmf_input": tmf_data,
+        "tmf_basic_info": {},
+        "plans": [],
+        # 配置（由 load_config 节点填充）
+        "rules_md": "",
+        "profile_template": {},
+        "rag_api_config": {},
+        # 消息
+        "messages": [],
+        # 总览 (Phase 2)
+        "offer_overview": "",
+        "need_rag": False,
+        "rag_queries": [],
+        # RAG (Phase 3)
+        "rag_context": [],
+        # 并行 Plan (Phase 4)
+        "plan_index": 0,
+        "plan_results": [],
+        # 输出 (Phase 5)
+        "profile_output": None,
+        "validation_errors": [],
+        "final_output": None,
+    }
 
 
 def run_agent(
@@ -80,25 +109,14 @@ def run_agent(
 
     # 3. 编译 Agent
     agent = compile_agent(llm)
-    logger.info("Agent 编译完成")
+    logger.info("Agent (v2) 编译完成 | 架构: parse → slim → overview → RAG → parallel plans → final")
 
     # 4. 运行
-    initial_state = {
-        "tmf_input": tmf_data,
-        "rules_md": "",
-        "profile_template": {},
-        "rag_api_config": {},
-        "messages": [],
-        "need_rag": False,
-        "rag_queries": [],
-        "rag_context": [],
-        "profile_output": None,
-        "validation_errors": [],
-        "final_output": None,
-    }
+    initial_state = _make_initial_state(tmf_data)
 
-    logger.info("开始执行 Agent 工作流...")
-    result = agent.invoke(initial_state)
+    plan_hint = len(tmf_data.get("plan_list", []))
+    logger.info(f"开始执行 Agent 工作流... (检测到 {plan_hint} 个 plan)")
+    result = agent.invoke(initial_state, config={"configurable": {"thread_id": "default"}})
     logger.info("Agent 工作流执行完成")
 
     # 5. 输出结果
@@ -130,7 +148,7 @@ def run_agent(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ProfileAgent - 运营商套餐 Offer 画像生成 Agent"
+        description="ProfileAgent - 运营商套餐 Offer 画像生成 Agent (v2 多 Plan 并行)"
     )
     _ = parser.add_argument("--input", "-i", required=True,
                             help="TMF 格式的套餐 JSON 文件路径")
@@ -146,9 +164,9 @@ def main():
             output_path=args.output,
             verbose=args.verbose,
         )
-        logger.info(f"\n{'='*60}")
+        logger.info(f"\n{'=' * 60}")
         logger.info("生成结果预览:")
-        logger.info(json.dumps(result, ensure_ascii=False, indent=2)[:500])
+        logger.info(json.dumps(result, ensure_ascii=False, indent=2)[:800])
         sys.exit(0)
     except Exception as e:
         logger.error(f"执行失败: {e}", exc_info=args.verbose)

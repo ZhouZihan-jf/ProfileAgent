@@ -9,6 +9,11 @@
 ## RAG 知识库检索结果
 {rag_context}
 
+<!-- 可选：Offer 总览和 Plan 分析结果，仅当存在时提供额外上下文 -->
+{offer_overview}
+
+{plan_results}
+
 ## 生成要求
 1. 严格按照画像字段定义的结构输出 JSON
 2. source=model 的字段由你根据上下文自行生成
