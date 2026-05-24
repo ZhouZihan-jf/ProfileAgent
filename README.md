@@ -37,7 +37,7 @@
 |------|---------|
 | **减少 Token 消耗** | JSON 瘦身（递归裁剪非关键字段），总览阶段只传 Plan 摘要，worker 阶段只传单个 Plan 完整数据 |
 | **并行加速** | LangGraph `Send` API 实现 fan-out → [worker × N] → fan-in |
-| **按需 RAG** | 由 LLM 自主判断是否需要知识检索，自动生成检索查询 |
+| **主动 RAG** | LLM 自主判断知识缺口 → 查询扩展优化 → 检索评分过滤 → 充分性检查 + 条件重试 → Plan 级差异化知识注入 |
 | **全链路降级** | 配置文件缺失、LLM 调用失败、RAG 不可用时均有 fallback |
 | **配置驱动** | 画像模板、RAG 规则、Prompt 模板全部外部化 |
 
@@ -75,16 +75,26 @@ RAG 调用有成本（延迟 + 资源）。让 LLM 基于 template 的 `source` 
      ┌─────────────────────────────┼─────────────────────────────┐
      │                             ▼                             │
      │  Phase 1 ─── parse_tmf → slim_json → load_config         │
-     │    (纯代码)    校验 +        JSON     加载模板/规则/       │
+     │    (纯代码)    校验 +        JSON     加载模板/规则/        │
      │              类型转换      瘦身      RAG API 配置          │
      │                             │                             │
      │              Phase 2 ─── generate_overview (LLM × 1)      │
      │                    ┌────────┴────────┐                    │
      │              need_rag?               no                   │
      │              │ yes                    │                    │
-     │   Phase 3 ─── rag_query              │                    │
-     │              │                        │                    │
-     │              └────────┬───────────────┘                    │
+     │   Phase 2.5 ─ query_refine (LLM × 1, 查询扩展)            │
+     │              │                                             │
+     │   Phase 3 ─── rag_query                                  │
+     │              │                                             │
+     │   Phase 3.5 ─ rag_sufficiency_check (LLM × 1)            │
+     │              │                                             │
+     │              ├── insufficient → loop to query_refine      │
+     │              │   (最多 rag_loop_max 次)                    │
+     │              │                                             │
+     │   Phase 3.8 ─ plan_rag_planner (LLM × 1 + RAG × N)      │
+     │              │  (为每个 Plan 生成专属领域知识)             │
+     │              │                                             │
+     │              └────────┬─────────────────────────────────  │
      │                       ▼                                    │
      │              dispatch_plans (passthrough)                  │
      │                       │                                    │
@@ -108,7 +118,7 @@ RAG 调用有成本（延迟 + 资源）。让 LLM 基于 template 的 `source` 
      └───────────────────────────────────────────────────────────┘
 ```
 
-**LLM 调用次数**：1（总览）+ N（Plan worker）+ 1（汇总）= **N + 2 次**，其中 N 个 worker 并行执行。
+**LLM 调用次数**：1(总览) + 1(查询优化) + 1(充分检查) + 1(Plan级RAG) + N(worker) + 1(汇总) = **N + 5 次**，N 个 worker 并行执行。当无需 RAG 时为 N + 2 次。
 
 ---
 
@@ -176,19 +186,82 @@ RAG 调用有成本（延迟 + 资源）。让 LLM 基于 template 的 `source` 
 
 ---
 
-### Phase 3：RAG 检索（可选）
+### Phase 2.5：查询优化 `query_refine`（LLM × 1）
 
-`rag_query(state)` 负责：
+`query_refine(state, llm)` 对 LLM 生成的原始查询做多角度扩展：
 
-1. 检查 `need_rag` 标记和 `queries` 列表
-2. 从 `rag_api_config` 创建 `RAGClient`（基于 `httpx`）
-3. 调用 `batch_search(queries)`，每条查询取 top-3 文档
-4. 返回 `rag_context: list[dict]`，每个 doc 包含 `{query, content, score, metadata}`
+1. **双语变体**：中英文双向生成，适配多语言知识库
+2. **同义词替换**：不同措辞表达同一意图（"竞品对比" → "竞争对手分析" + "市场份额比较"）
+3. **角度切换**：技术参数、市场定位、用户评价、行业趋势
+4. **粒度拆分**：复杂查询拆为 2-3 个子查询
+
+```json
+// 输入 queries: ["5G套餐 竞品分析"]
+// 输出 expanded_queries: [
+//   "5G大流量套餐 竞品对比 中国移动 中国联通",
+//   "5G unlimited data plan competitor comparison 2025",
+//   "运营商大流量套餐 价格 速率 服务对比",
+//   "5G套餐 市场份额 用户评价"
+// ]
+```
+
+扩展失败时回退使用原始查询，不阻断流程。
+
+---
+
+### Phase 3：RAG 检索 + 充分性检查
+
+#### `rag_query` — 检索 + 评分过滤
+
+1. 从 `rag_api_config` 创建 `RAGClient`（基于 `httpx`）
+2. 调用 `batch_search(queries)` 批量检索
+3. **评分过滤**：丢弃 `score < min_score`（配置项，默认 0.3）的文档
+4. 按评分降序排列，取 top-20
+5. 返回 `rag_context: list[dict]`，每个 doc 含 `{query, content, score, metadata}`
+
+#### `rag_sufficiency_check` — 充分性评估 + 条件重试
+
+`rag_sufficiency_check(state, llm)` 对检索结果逐字段评估覆盖度：
+
+1. 对每个 `source=rag` 字段判断检索是否充分
+2. 输出置信度打分（0.0-1.0）和差距分析
+3. 不充分时生成**修正查询**（`refined_queries`）
+
+**条件重试回路**：
+
+```
+rag_sufficiency_check
+    ├── sufficient → plan_rag_planner（进入下一步）
+    └── insufficient + retry < rag_loop_max → query_refine（回路重试）
+        └── retry >= rag_loop_max → plan_rag_planner（放弃重试）
+```
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `rag_loop_max` | 2 | 最大重试轮次 |
+| `min_score` | 0.3 | 检索评分过滤阈值 |
+
+---
+
+### Phase 3.8：Plan 级差异化 RAG `plan_rag_planner`
+
+`plan_rag_planner(state, llm)` 为每个 Plan 生成专属领域知识，解决不同 Plan 需要不同知识的问题：
+
+1. **LLM 分析**：逐 Plan 判断是否需要独立 RAG
+   - 涉及特定技术领域（5G SA、物联网、国际漫游）→ 需要
+   - 全局 RAG 已充分覆盖 → 不需要
+2. **按需检索**：为需要 RAG 的 Plan 调用 RAG API，结果按 `plan_index` 存储到 `plan_rag_contexts`
+3. **Worker 消费**：`plan_worker` 合并 `rag_context`（全局）+ `plan_rag_contexts[plan_index]`（专属）
+
+```
+5G流量包 Plan ──→ RAG: "5G SA组网 速率标准"  ──→ plan_rag_contexts[0]
+国际漫游 Plan ──→ RAG: "全球漫游资费 2025" ──→ plan_rag_contexts[1]
+基础语音 Plan ──→ 跳过（信息已足够）
+```
 
 **容错机制**：
-- `need_rag = false` 或无 queries → 跳过
-- RAG API 未配置 → 跳过
-- 网络/解析异常 → 返回空 context + 错误消息
+- RAG API 不可用 → 所有 Plan 使用全局 RAG
+- 检索失败 → 仅该 Plan 回退到全局 RAG
 
 ---
 
@@ -220,10 +293,11 @@ return [
 每个 worker 实例接收一个独立的 `plan_index`：
 
 1. 从 `state["plans"]` 取值 `plans[plan_index]`
-2. 组装 prompt：offer_overview + plan JSON + RAG context
-3. 调用 LLM 生成该 Plan 的**画像片段**（JSON dict）
-4. 注入标识：`_plan_id`、`_plan_name`、`_plan_index`
-5. 返回 `{"plan_results": [plan_profile]}`
+2. 合并 RAG 上下文：`rag_context`（全局）+ `plan_rag_contexts[plan_index]`（专属）
+3. 组装 prompt：offer_overview + plan JSON + 合并后的 RAG context
+4. 调用 LLM 生成该 Plan 的**画像片段**（JSON dict）
+5. 注入标识：`_plan_id`、`_plan_name`、`_plan_index`
+6. 返回 `{"plan_results": [plan_profile]}`
 
 #### Reducer 自动合并
 
@@ -265,12 +339,12 @@ def _merge_plan_results(existing, new):
 
 ```
 Phase 1 → Phase 2 → Phase 3 → Phase 4 (并行) → Phase 5
-────────────────────────────────────────────────────────
-tmf_input         offer_overview    rag_context    plan_index        profile_output
-tmf_basic_info    need_rag                         plan_results*     validation_errors
-plans             rag_queries                       (reducer)        final_output
-rules_md
-profile_template
+──────────────────────────────────────────────────────────────────
+tmf_input         offer_overview    rag_context          plan_index        profile_output
+tmf_basic_info    need_rag         rag_retry_count      plan_results*     validation_errors
+plans             rag_queries      rag_sufficiency_      (reducer)        final_output
+rules_md                            report
+profile_template                   plan_rag_contexts
 rag_api_config
 messages  (LangChain BaseMessage 序列，贯穿全局)
 ```
@@ -284,7 +358,7 @@ messages  (LangChain BaseMessage 序列，贯穿全局)
 | 用户输入 | `tmf_input` |
 | Phase 1 纯代码输出 | `tmf_basic_info`, `plans`, `rules_md`, `profile_template`, `rag_api_config` |
 | Phase 2 LLM 输出 | `offer_overview`, `need_rag`, `rag_queries` |
-| Phase 3 RAG 输出 | `rag_context` |
+| Phase 3 RAG 输出 | `rag_context`, `rag_retry_count`, `rag_sufficiency_report`, `plan_rag_contexts` |
 | Phase 4 路由注入 | `plan_index` |
 | Phase 4 Worker 输出 | `plan_results` |
 | Phase 5 输出 | `profile_output`, `validation_errors`, `final_output` |
@@ -299,7 +373,7 @@ messages  (LangChain BaseMessage 序列，贯穿全局)
 |------|------|
 | `state.py` | `AgentState` TypedDict 定义 + `_merge_plan_results` reducer |
 | `graph.py` | LangGraph StateGraph 组装、LLM 闭包注入、条件路由、Send fan-out |
-| `nodes.py` | 全部 7 个节点的实现 + `_parse_json_response` 工具函数 |
+| `nodes.py` | 全部 12 个节点的实现 + `_parse_json_response` 工具函数 |
 
 **模块间依赖**：
 
@@ -380,15 +454,18 @@ ProfileAgent/
 │   ├── agent/
 │   │   ├── state.py                 # AgentState TypedDict 定义
 │   │   ├── graph.py                 # LangGraph StateGraph 组装
-│   │   └── nodes.py                 # 7 个工作流节点实现
+│   │   └── nodes.py                 # 12 个工作流节点实现
 │   ├── config/
 │   │   └── config.py                # Pydantic 模型 + 配置加载
 │   └── rag/
 │       └── client.py                # RAG RESTful API 客户端
 ├── config/
-│   ├── rag_config.yaml              # RAG API 连接配置
+│   ├── rag_config.yaml              # RAG API 配置 (含 min_score, rag_loop_max)
 │   ├── prompts/
 │   │   ├── generate_overview.md     # Phase 2: 总览生成 prompt
+│   │   ├── query_refine.md          # Phase 2.5: 查询扩展优化 prompt
+│   │   ├── rag_sufficiency_check.md # Phase 3.5: 检索充分性评估 prompt
+│   │   ├── plan_rag_planner.md      # Phase 3.8: Plan级RAG规划 prompt
 │   │   ├── plan_worker.md           # Phase 4: Plan 分析 prompt
 │   │   ├── generate_final_profile.md# Phase 5: 最终汇总 prompt
 │   │   ├── generate_profile.md      # 降级/无 Plan 时 prompt
@@ -480,6 +557,8 @@ api_key: ""
 timeout: 30
 max_retries: 2
 default_top_k: 5
+min_score: 0.3          # 检索结果最低评分过滤阈值
+rag_loop_max: 2         # RAG 充分性检查最大重试轮次
 endpoints:
   - name: search
     path: /rag/search
@@ -495,6 +574,9 @@ RAG 客户端默认使用第一个 `endpoint`，可通过 `search()` 的 `endpoi
 | Prompt | 占位符 |
 |--------|--------|
 | `generate_overview.md` | `{rules}`, `{offer_basic}`, `{plan_summaries}`, `{plan_count}`, `{template_fields}`, `{rag_field_count}` |
+| `query_refine.md` | `{template_fields}`, `{queries}`, `{offer_basic}` |
+| `rag_sufficiency_check.md` | `{template_fields}`, `{queries}`, `{rag_docs}`, `{doc_count}`, `{retry_count}` |
+| `plan_rag_planner.md` | `{offer_overview}`, `{global_rag_summary}`, `{plan_list}`, `{plan_count}`, `{template_fields}` |
 | `plan_worker.md` | `{offer_overview}`, `{plan_index}`, `{plan_json}`, `{rag_context}` |
 | `generate_final_profile.md` | `{template_fields}`, `{offer_basic}`, `{offer_overview}`, `{plan_count}`, `{plan_results}`, `{rag_context}` |
 

@@ -1,15 +1,18 @@
 """
-Agent Graph - LangGraph 状态图组装 (v2 — 多 Plan 并行架构)
+Agent Graph - LangGraph 状态图组装 (v2 — 多 Plan 并行架构 + RAG 循环增强)
 
 工作流:
     Phase 1: parse_tmf → slim_json → load_config
     Phase 2: generate_overview (LLM: 总览 + RAG 查询)
-    Phase 3: rag_query (子 agent: 知识检索)
+    Phase 2.5: query_refine (LLM: 查询扩展优化)
+    Phase 3: rag_query → rag_sufficiency_check (检索 + 充分性评估, 不充分时回路)
+    Phase 3.8: plan_rag_planner (LLM + RAG: 为每个 Plan 生成专属领域知识)
     Phase 4: dispatch → [plan_worker × N]  (Send 并行 Map-Reduce)
     Phase 5: generate_final_profile → validate_profile → END
 
 无 Plan 时: Phase 4 自动跳过 → 直接 Phase 5
-无 RAG 需求时: Phase 3 自动跳过 → 直接 Phase 4
+无 RAG 需求时: Phase 2.5~3 自动跳过 → 直接 Phase 4
+RAG 不充分时: rag_sufficiency_check → query_refine (回路重试, 最多 rag_loop_max 次)
 
 LLM 实例通过闭包注入到需要模型推理的节点。
 """
@@ -27,7 +30,10 @@ from src.agent.nodes import (
     slim_json,
     load_config,
     generate_overview,
+    query_refine,
     rag_query,
+    rag_sufficiency_check,
+    plan_rag_planner,
     plan_worker,
     generate_final_profile,
     validate_profile,
@@ -43,6 +49,24 @@ logger = logging.getLogger(__name__)
 def _overview_wrapper(llm: ChatOpenAI):
     def inner(state: AgentState):
         return generate_overview(state, llm)
+    return inner
+
+
+def _query_refine_wrapper(llm: ChatOpenAI):
+    def inner(state: AgentState):
+        return query_refine(state, llm)
+    return inner
+
+
+def _sufficiency_wrapper(llm: ChatOpenAI):
+    def inner(state: AgentState):
+        return rag_sufficiency_check(state, llm)
+    return inner
+
+
+def _plan_rag_wrapper(llm: ChatOpenAI):
+    def inner(state: AgentState):
+        return plan_rag_planner(state, llm)
     return inner
 
 
@@ -67,13 +91,32 @@ def _passthrough(_: AgentState) -> dict[str, Any]:
 #  条件路由
 # ═══════════════════════════════════════════════════════════════
 
-def _route_after_overview(state: AgentState) -> Literal["rag_query", "dispatch_plans"]:
-    """总览生成后：需要 RAG 则先去检索，否则直接分发 plans"""
+def _route_after_overview(state: AgentState) -> Literal["query_refine", "dispatch_plans"]:
+    """总览生成后：需要 RAG 则先优化查询再检索，否则直接分发 plans"""
     if state.get("need_rag", False) and state.get("rag_queries"):
-        logger.info("→ 路由到 rag_query (需要 RAG 检索)")
-        return "rag_query"
+        logger.info("→ 路由到 query_refine (需要 RAG 检索)")
+        return "query_refine"
     logger.info("→ 路由到 dispatch_plans (跳过 RAG)")
     return "dispatch_plans"
+
+
+def _route_after_rag_check(state: AgentState) -> Literal["query_refine", "plan_rag_planner"]:
+    """RAG 充分性检查后：通过 → Plan 级 RAG，不充分 → 重试"""
+    report = state.get("rag_sufficiency_report", {})
+    retry_count = state.get("rag_retry_count", 0)
+    rag_cfg: dict[str, Any] = state.get("rag_api_config", {})
+    max_rounds = rag_cfg.get("rag_loop_max", 2)
+
+    if report.get("sufficient", True):
+        logger.info("RAG 充分性检查通过 → plan_rag_planner")
+        return "plan_rag_planner"
+
+    if retry_count < max_rounds:
+        logger.info(f"RAG 不充分，重试 {retry_count + 1}/{max_rounds} → query_refine")
+        return "query_refine"
+
+    logger.warning(f"RAG 已达最大重试 {max_rounds} 次 → plan_rag_planner")
+    return "plan_rag_planner"
 
 
 def _fan_out_plans(state: AgentState):
@@ -114,7 +157,10 @@ def create_graph(llm: ChatOpenAI) -> StateGraph:
     workflow.add_node("slim_json", slim_json)
     workflow.add_node("load_config", load_config)  # type: ignore[arg-type]
     workflow.add_node("generate_overview", _overview_wrapper(llm))
+    workflow.add_node("query_refine", _query_refine_wrapper(llm))
     workflow.add_node("rag_query", rag_query)
+    workflow.add_node("rag_sufficiency_check", _sufficiency_wrapper(llm))
+    workflow.add_node("plan_rag_planner", _plan_rag_wrapper(llm))
     workflow.add_node("dispatch_plans", _passthrough)  # type: ignore[arg-type]   # 路由枢纽（无状态变更）
     workflow.add_node("plan_worker", _plan_worker_wrapper(llm))
     workflow.add_node("generate_final_profile", _final_wrapper(llm))
@@ -125,16 +171,24 @@ def create_graph(llm: ChatOpenAI) -> StateGraph:
     workflow.add_edge("parse_tmf", "slim_json")
     workflow.add_edge("slim_json", "load_config")
 
-    # ===== Phase 2 → RAG 条件路由 =====
+    # ===== Phase 2 → 查询优化 → RAG =====
     workflow.add_edge("load_config", "generate_overview")
     workflow.add_conditional_edges(
         "generate_overview",
         _route_after_overview,
-        {"rag_query": "rag_query", "dispatch_plans": "dispatch_plans"},
+        {"query_refine": "query_refine", "dispatch_plans": "dispatch_plans"},
     )
+    workflow.add_edge("query_refine", "rag_query")
 
-    # ===== Phase 3 → Phase 4 =====
-    workflow.add_edge("rag_query", "dispatch_plans")
+    # ===== Phase 3: RAG 检索 → 充分性检查 → Plan 级 RAG =====
+    workflow.add_edge("rag_query", "rag_sufficiency_check")
+    workflow.add_conditional_edges(
+        "rag_sufficiency_check",
+        _route_after_rag_check,
+        {"query_refine": "query_refine", "plan_rag_planner": "plan_rag_planner"},
+    )
+    # ↑ 不充分 → 回路到 query_refine（RAG 循环），充分 → plan_rag_planner
+    workflow.add_edge("plan_rag_planner", "dispatch_plans")
 
     # ===== Phase 4: Send Map-Reduce =====
     # dispatch_plans 完成 → _fan_out_plans 决定 Send[] 或直接跳到汇总

@@ -50,8 +50,10 @@ class RAGAPIConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API 密钥")
     endpoints: list[RAGEndpoint] = Field(description="可用端点列表")
     timeout: int = Field(default=30, description="请求超时(秒)")
-    max_retries: int = Field(default=2, description="最大重试次数")
+    max_retries: int = Field(default=2, description="API 调用最大重试次数")
     default_top_k: int = Field(default=5, description="默认返回文档数")
+    min_score: float = Field(default=0.3, description="检索结果最低相关性分数阈值")
+    rag_loop_max: int = Field(default=2, description="RAG 充分性检查最大重试轮次")
 
 
 class TMFOffer(BaseModel):
@@ -118,6 +120,8 @@ def load_rag_config() -> RAGAPIConfig:
         timeout=data.get("timeout", 30),
         max_retries=data.get("max_retries", 2),
         default_top_k=data.get("default_top_k", 5),
+        min_score=data.get("min_score", 0.3),
+        rag_loop_max=data.get("rag_loop_max", 2),
     )
 
 

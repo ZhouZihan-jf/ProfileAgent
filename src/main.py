@@ -65,6 +65,9 @@ def _make_initial_state(tmf_data: dict[str, Any]) -> dict[str, Any]:
         "rag_queries": [],
         # RAG (Phase 3)
         "rag_context": [],
+        "rag_retry_count": 0,
+        "rag_sufficiency_report": None,
+        "plan_rag_contexts": {},
         # 并行 Plan (Phase 4)
         "plan_index": 0,
         "plan_results": [],

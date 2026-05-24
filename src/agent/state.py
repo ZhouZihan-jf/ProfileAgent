@@ -59,6 +59,15 @@ class AgentState(TypedDict):
     rag_context: list[dict[str, Any]]
     """RAG 返回的上下文文档"""
 
+    rag_retry_count: int
+    """RAG 重试次数（0-based，max 由配置决定）"""
+
+    rag_sufficiency_report: Optional[dict[str, Any]]
+    """RAG 检索充分性评估报告"""
+
+    plan_rag_contexts: dict[int, list[dict[str, Any]]]
+    """Plan 级差异化 RAG 上下文: {plan_index: [docs]}"""
+
     # ========== Phase 4: 并行 Plan 处理 ==========
     plan_index: int
     """当前 worker 处理的 plan 索引（由 Send 注入，0-based）"""

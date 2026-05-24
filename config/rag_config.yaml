@@ -15,6 +15,12 @@ max_retries: 2
 # 默认返回文档数
 default_top_k: 5
 
+# 检索结果最低相关性分数阈值（低于此阈值的文档将被过滤）
+min_score: 0.3
+
+# RAG 充分性检查最大重试轮次（每次重试会用修正后的查询重新检索）
+rag_loop_max: 2
+
 # 可用端点
 endpoints:
   - name: search
